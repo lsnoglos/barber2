@@ -2,5 +2,13 @@
   "name": "barber2",
   "main": "src/index.js",
   "compatibility_date": "2026-11-01",
-  "workers_dev": true
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "barber2-db",
+      "database_id": "30aabafc-348b-4dff-bde0-bd641ae16488",
+      "migrations_dir": "migrations"
+    }
+  ]
 }
