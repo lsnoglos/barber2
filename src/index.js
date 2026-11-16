@@ -1,19 +1,65 @@
-const page = `<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex,nofollow">
-<title>BarberControl 2 — Preparación</title>
-<style>
-:root{color-scheme:dark;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0c111b;color:#f3f5f9;padding:20px}
-main{max-width:560px;background:#171e2c;border:1px solid #303a4d;border-radius:20px;padding:36px;text-align:center;box-shadow:0 18px 60px #0004}
-h1{font-size:clamp(28px,5vw,42px);margin:10px 0}p{line-height:1.6;color:#c4ccd9}.tag{display:inline-block;padding:8px 12px;background:#24344a;border-radius:999px;color:#9ee4ff;font-size:13px}
-small{display:block;margin-top:24px;color:#9aa5b8}
-</style>
-</head>
-<body><main><span class="tag">Despliegue de prueba</span><h1>✂ BarberControl 2</h1><p>La aplicación se ha publicado correctamente en Cloudflare Workers.</p><p>Estamos preparando la plataforma multibarbería. El inicio de sesión y las reservas todavía no están habilitados.</p><small>Esta página no recibe datos de clientes.</small></main></body></html>`;
+import { page } from "./page.js";
+import { client } from "./client.js";
+import { verifyFirebaseIdToken, AuthError } from "./firebase-auth.js";
+
+const csp = [
+  "default-src 'self'",
+  "script-src 'self' https://www.gstatic.com",
+  "style-src 'self' 'unsafe-inline'",
+  "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com",
+  "frame-src https://barbercontrol2.firebaseapp.com https://accounts.google.com https://*.google.com",
+  "img-src 'self' data: https://*.googleusercontent.com",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'"
+].join("; ");
+
+function json(data, status = 200) {
+  return Response.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Vary": "Authorization"
+    }
+  });
+}
+
+async function currentAccount(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  if (!/^Bearer [^\s]+$/.test(auth)) return json({ error: "Inicia sesión con Google." }, 401);
+  try {
+    const claims = await verifyFirebaseIdToken(auth.slice(7));
+    if (!env.DB) return json({ error: "Base de datos no disponible." }, 503);
+    const user = await env.DB.prepare(
+      "SELECT id, status FROM users WHERE firebase_uid = ? LIMIT 1"
+    ).bind(claims.sub).first();
+    if (user && user.status !== "active") {
+      return json({ error: "Esta cuenta fue deshabilitada por la administración." }, 403);
+    }
+    const superAdmin = user ? Boolean(await env.DB.prepare(
+      "SELECT 1 AS allowed FROM platform_admins WHERE user_id = ? LIMIT 1"
+    ).bind(user.id).first()) : false;
+    const businesses = user ? (await env.DB.prepare(
+      "SELECT b.id, b.name, b.slug, bm.role FROM business_members bm JOIN businesses b ON b.id = bm.business_id WHERE bm.user_id = ? AND bm.status = 'active' AND b.status = 'active' ORDER BY b.name LIMIT 100"
+    ).bind(user.id).all()).results : [];
+    return json({
+      authenticated: true,
+      access: superAdmin ? "superadmin" : businesses.length ? "member" : "pending",
+      superAdmin,
+      identity: {
+        uid: claims.sub,
+        email: typeof claims.email === "string" ? claims.email : "",
+        name: typeof claims.name === "string" ? claims.name : ""
+      },
+      businesses
+    });
+  } catch (error) {
+    if (error instanceof AuthError) return json({ error: "Sesión inválida. Vuelve a iniciar sesión." }, 401);
+    return json({ error: "No se pudo comprobar el acceso. Intenta nuevamente." }, 503);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -22,17 +68,26 @@ export default {
       try {
         const check = await env.DB?.prepare("SELECT 1 AS ok").first();
         dbReady = check?.ok === 1;
-      } catch (_) {
-        dbReady = false;
-      }
-      return Response.json({
+      } catch (_) { dbReady = false; }
+      return json({
         ok: dbReady,
         project: "barber2",
-        stage: "database-connected",
+        stage: "google-auth-preview",
         database: dbReady ? "connected" : "unavailable"
-      }, {
-        status: dbReady ? 200 : 503,
-        headers: {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+      }, dbReady ? 200 : 503);
+    }
+    if (url.pathname === "/api/me") {
+      if (request.method !== "GET") return json({ error: "Método no permitido." }, 405);
+      return currentAccount(request, env);
+    }
+    if (request.method !== "GET") return new Response("Método no permitido", { status: 405 });
+    if (url.pathname === "/app.js") {
+      return new Response(client, {
+        headers: {
+          "Content-Type": "text/javascript; charset=utf-8",
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
+        }
       });
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
@@ -40,11 +95,15 @@ export default {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store",
-          "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-          "X-Content-Type-Options": "nosniff"
+          "Content-Security-Policy": csp,
+          "X-Content-Type-Options": "nosniff",
+          "Referrer-Policy": "strict-origin-when-cross-origin"
         }
       });
     }
-    return new Response("No encontrado", {status:404, headers:{"Content-Type":"text/plain; charset=utf-8"}});
+    return new Response("No encontrado", {
+      status: 404,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }
+    });
   }
 };
