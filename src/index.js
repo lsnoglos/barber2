@@ -15,11 +15,24 @@ small{display:block;margin-top:24px;color:#9aa5b8}
 </head>
 <body><main><span class="tag">Despliegue de prueba</span><h1>✂ BarberControl 2</h1><p>La aplicación se ha publicado correctamente en Cloudflare Workers.</p><p>Estamos preparando la plataforma multibarbería. El inicio de sesión y las reservas todavía no están habilitados.</p><small>Esta página no recibe datos de clientes.</small></main></body></html>`;
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/api/health") {
-      return Response.json({ok: true, project: "barber2", stage: "initial-deployment"}, {
-        headers: {"Cache-Control": "no-store"}
+      let dbReady = false;
+      try {
+        const check = await env.DB?.prepare("SELECT 1 AS ok").first();
+        dbReady = check?.ok === 1;
+      } catch (_) {
+        dbReady = false;
+      }
+      return Response.json({
+        ok: dbReady,
+        project: "barber2",
+        stage: "database-connected",
+        database: dbReady ? "connected" : "unavailable"
+      }, {
+        status: dbReady ? 200 : 503,
+        headers: {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
       });
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
